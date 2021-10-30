@@ -71,7 +71,7 @@ CaptureWidget::CaptureWidget(uint id,
   , m_selection(nullptr)
   , m_existingObjectIsChanged(false)
   , m_startMove(false)
-  , m_thicknessByKeyboard(0)
+  , m_toolSizeByKeyboard(0)
 {
     m_undoStack.setUndoLimit(ConfigHandler().undoLimit());
 
@@ -184,17 +184,27 @@ CaptureWidget::CaptureWidget(uint id,
     connect(m_colorPicker,
             &ColorPicker::colorSelected,
             this,
-            &CaptureWidget::setDrawColor);
+            [this](const QColor& c) {
+                m_context.mousePos = mapFromGlobal(QCursor::pos());
+                setDrawColor(c);
+            });
     m_colorPicker->hide();
+
+    // Init tool size sigslots
+    connect(this,
+            &CaptureWidget::toolSizeChanged,
+            this,
+            &CaptureWidget::onToolSizeChanged);
 
     // Init notification widget
     m_notifierBox = new NotifierBox(this);
     m_notifierBox->hide();
     connect(m_notifierBox, &NotifierBox::hidden, this, [this]() {
-        // Show cursor if it was hidden while adjusting tool thickness
+        // Show cursor if it was hidden while adjusting tool size
         updateCursor();
-        m_thicknessByKeyboard = 0;
-        setDrawThickness(m_context.thickness);
+        m_toolSizeByKeyboard = 0;
+        onToolSizeChanged(m_context.toolSize);
+        onToolSizeSettled(m_context.toolSize);
     });
 
     initPanel();
@@ -280,7 +290,6 @@ void CaptureWidget::initButtons()
 
         switch (t) {
             case CaptureTool::TYPE_UNDO:
-            case CaptureTool::TYPE_IMAGEUPLOADER:
             case CaptureTool::TYPE_REDO:
                 // nothing to do, just skip non-dynamic buttons with existing
                 // hard coded slots
@@ -290,12 +299,12 @@ void CaptureWidget::initButtons()
                 QString shortcut =
                   ConfigHandler().shortcut(QVariant::fromValue(t).toString());
                 if (!shortcut.isNull()) {
-                    QShortcut* key =
-                      new QShortcut(QKeySequence(shortcut), this);
-                    CaptureWidget* captureWidget = this;
-                    connect(key, &QShortcut::activated, this, [=]() {
-                        captureWidget->setState(b);
-                    });
+                    auto shortcuts = newShortcut(shortcut, this, nullptr);
+                    for (auto* shortcut : shortcuts) {
+                        connect(shortcut, &QShortcut::activated, this, [=]() {
+                            setState(b);
+                        });
+                    }
                 }
                 break;
         }
@@ -309,13 +318,45 @@ void CaptureWidget::initButtons()
 
         if (visibleButtonTypes.contains(t)) {
             connect(b,
-                    &CaptureToolButton::pressedButton,
+                    &CaptureToolButton::pressedButtonLeftClick,
                     this,
-                    &CaptureWidget::setState);
+                    &CaptureWidget::handleButtonLeftClick);
+
+            if (b->tool()->isSelectable()) {
+                connect(b,
+                        &CaptureToolButton::pressedButtonRightClick,
+                        this,
+                        &CaptureWidget::handleButtonRightClick);
+            }
+
             vectorButtons << b;
         }
     }
     m_buttonHandler->setButtons(vectorButtons);
+}
+
+void CaptureWidget::handleButtonRightClick(CaptureToolButton* b)
+{
+    if (!b) {
+        return;
+    }
+
+    // if button already selected, do not deselect it on right click
+    if (!m_activeButton || m_activeButton != b) {
+        setState(b);
+    }
+    if (!m_panel->isVisible()) {
+        m_panel->show();
+    }
+}
+
+void CaptureWidget::handleButtonLeftClick(CaptureToolButton* b)
+{
+    if (!b) {
+        return;
+    }
+
+    setState(b);
 }
 
 void CaptureWidget::initHelpMessage()
@@ -495,9 +536,9 @@ bool CaptureWidget::startDrawObjectTool(const QPoint& pos)
                 m_activeTool,
                 &CaptureTool::onColorChanged);
         connect(this,
-                &CaptureWidget::thicknessChanged,
+                &CaptureWidget::toolSizeChanged,
                 m_activeTool,
-                &CaptureTool::onThicknessChanged);
+                &CaptureTool::onSizeChanged);
         connect(m_activeTool,
                 &CaptureTool::requestAction,
                 this,
@@ -541,11 +582,11 @@ int CaptureWidget::selectToolItemAtPos(const QPoint& pos)
         if (!toolItem ||
             (toolItem && !toolItem->boundingRect().contains(pos))) {
             activeLayerIndex = m_captureToolObjects.find(pos, size());
-            int thickness_old = m_context.thickness;
+            int oldToolSize = m_context.toolSize;
             m_panel->setActiveLayer(activeLayerIndex);
             drawObjectSelection();
-            if (thickness_old != m_context.thickness) {
-                emit thicknessChanged(m_context.thickness);
+            if (oldToolSize != m_context.toolSize) {
+                emit toolSizeChanged(m_context.toolSize);
             }
         }
     }
@@ -729,50 +770,43 @@ void CaptureWidget::mouseReleaseEvent(QMouseEvent* e)
     updateCursor();
 }
 
-void CaptureWidget::updateThickness(int thickness)
+/**
+ * Was updateThickness.
+ * - Update tool mouse preview
+ * - Show notifier box displaying the new thickness
+ * - Update selected object thickness
+ */
+void CaptureWidget::setToolSize(int size)
 {
-    auto tool = activeButtonTool();
-    updateTool(tool);
-    m_context.thickness = qBound(1, thickness, maxDrawThickness);
+    int oldSize = m_context.toolSize;
+    m_context.toolSize = qBound(1, size, maxToolSize);
+    updateTool(activeButtonTool());
 
     QPoint topLeft =
       QGuiAppCurrentScreen().currentScreen()->geometry().topLeft();
     int offset = m_notifierBox->width() / 4;
     m_notifierBox->move(mapFromGlobal(topLeft) + QPoint(offset, offset));
-    m_notifierBox->showMessage(QString::number(m_context.thickness));
+    m_notifierBox->showMessage(QString::number(m_context.toolSize));
 
-    if (tool && tool->showMousePreview()) {
-        setCursor(Qt::BlankCursor);
-        updateTool(tool);
+    if (m_context.toolSize != oldSize) {
+        emit toolSizeChanged(m_context.toolSize);
     }
-
-    // update selected object thickness
-    auto toolItem = activeToolObject();
-    if (toolItem) {
-        toolItem->onThicknessChanged(m_context.thickness);
-        if (!m_existingObjectIsChanged) {
-            m_captureToolObjectsBackup = m_captureToolObjects;
-            m_existingObjectIsChanged = true;
-        }
-        setDrawThickness(m_context.thickness);
-    }
-    emit thicknessChanged(m_context.thickness);
 }
 
 void CaptureWidget::keyPressEvent(QKeyEvent* e)
 {
-    // If the key is a digit, change the thickness
+    // If the key is a digit, change the tool size
     bool ok;
     int digit = e->text().toInt(&ok);
     if (ok && e->modifiers() == Qt::NoModifier) { // digit received
-        m_thicknessByKeyboard = 10 * m_thicknessByKeyboard + digit;
-        updateThickness(m_thicknessByKeyboard);
-        if (m_context.thickness != m_thicknessByKeyboard) {
-            // The thickness was out of range and was clipped by updateThickness
-            m_thicknessByKeyboard = 0;
+        m_toolSizeByKeyboard = 10 * m_toolSizeByKeyboard + digit;
+        setToolSize(m_toolSizeByKeyboard);
+        if (m_context.toolSize != m_toolSizeByKeyboard) {
+            // The tool size was out of range and was clipped by setToolSize
+            m_toolSizeByKeyboard = 0;
         }
     } else {
-        m_thicknessByKeyboard = 0;
+        m_toolSizeByKeyboard = 0;
     }
 
     if (!m_selection->isVisible()) {
@@ -805,21 +839,21 @@ void CaptureWidget::wheelEvent(QWheelEvent* e)
      * impossible to scroll. It's easier to calculate number of requests and do
      * not accept events faster that one in 200ms.
      * */
-    int thicknessOffset = 0;
+    int toolSizeOffset = 0;
     if (e->angleDelta().y() >= 60) {
         // mouse scroll (wheel) increment
-        thicknessOffset = 1;
+        toolSizeOffset = 1;
     } else if (e->angleDelta().y() <= -60) {
         // mouse scroll (wheel) decrement
-        thicknessOffset = -1;
+        toolSizeOffset = -1;
     } else {
         // touchpad scroll
         qint64 current = QDateTime::currentMSecsSinceEpoch();
         if ((current - m_lastMouseWheel) > 200) {
             if (e->angleDelta().y() > 0) {
-                thicknessOffset = 1;
+                toolSizeOffset = 1;
             } else if (e->angleDelta().y() < 0) {
-                thicknessOffset = -1;
+                toolSizeOffset = -1;
             }
             m_lastMouseWheel = current;
         } else {
@@ -827,7 +861,7 @@ void CaptureWidget::wheelEvent(QWheelEvent* e)
         }
     }
 
-    updateThickness(m_context.thickness + thicknessOffset);
+    setToolSize(m_context.toolSize + toolSizeOffset);
 }
 
 void CaptureWidget::resizeEvent(QResizeEvent* e)
@@ -861,7 +895,7 @@ void CaptureWidget::initContext(bool fullscreen, uint requestId)
     m_context.color = m_config.drawColor();
     m_context.widgetOffset = mapToGlobal(QPoint(0, 0));
     m_context.mousePos = mapFromGlobal(QCursor::pos());
-    m_context.thickness = m_config.drawThickness();
+    m_context.toolSize = m_config.drawThickness();
     m_context.fullscreen = fullscreen;
 
     // initialize m_context.request
@@ -944,23 +978,24 @@ void CaptureWidget::initPanel()
             this,
             &CaptureWidget::setDrawColor);
     connect(m_sidePanel,
-            &SidePanelWidget::thicknessChanged,
+            &SidePanelWidget::toolSizeChanged,
             this,
-            &CaptureWidget::setDrawThickness);
+            &CaptureWidget::onToolSizeChanged);
     connect(this,
             &CaptureWidget::colorChanged,
             m_sidePanel,
-            &SidePanelWidget::updateColor);
+            &SidePanelWidget::onColorChanged);
     connect(this,
-            &CaptureWidget::thicknessChanged,
+            &CaptureWidget::toolSizeChanged,
             m_sidePanel,
-            &SidePanelWidget::updateThickness);
+            &SidePanelWidget::onToolSizeChanged);
     connect(m_sidePanel,
             &SidePanelWidget::togglePanel,
             m_panel,
             &UtilityPanel::toggle);
+    // TODO replace with a CaptureWidget signal
     emit m_sidePanel->colorChanged(m_context.color);
-    emit m_sidePanel->thicknessChanged(m_context.thickness);
+    emit toolSizeChanged(m_context.toolSize);
     m_panel->pushWidget(m_sidePanel);
 
     // Fill undo/redo/history list widget
@@ -1017,6 +1052,17 @@ void CaptureWidget::initSelection()
     });
     connect(m_selection, &SelectionWidget::geometrySettled, this, [this]() {
         if (m_selection->isVisible()) {
+            auto req = m_context.request();
+            if (req->tasks() & CaptureRequest::ACCEPT_ON_SELECT) {
+                m_captureDone = true;
+                if (req->tasks() & CaptureRequest::PIN) {
+                    QRect geometry = m_context.selection;
+                    geometry.setTopLeft(geometry.topLeft() +
+                                        m_context.widgetOffset);
+                    req->addPinTask(geometry);
+                }
+                close();
+            }
             m_buttonHandler->show();
         } else {
             m_buttonHandler->hide();
@@ -1067,22 +1113,12 @@ void CaptureWidget::setState(CaptureToolButton* b)
             m_activeButton->setColor(m_uiColor);
             m_activeButton = nullptr;
         }
-        loadDrawThickness();
+        m_context.toolSize = ConfigHandler().toolSize(activeButtonToolType());
+        emit toolSizeChanged(m_context.toolSize);
         updateCursor();
         updateSelectionState();
         updateTool(b->tool());
     }
-}
-
-void CaptureWidget::loadDrawThickness()
-{
-    if ((activeButtonToolType() == CaptureTool::TYPE_TEXT) ||
-        (m_activeTool && m_activeTool->type() == CaptureTool::TYPE_TEXT)) {
-        m_context.thickness = m_config.drawFontSize();
-    } else {
-        m_context.thickness = m_config.drawThickness();
-    }
-    emit m_sidePanel->thicknessChanged(m_context.thickness);
 }
 
 void CaptureWidget::handleToolSignal(CaptureTool::Request r)
@@ -1134,14 +1170,50 @@ void CaptureWidget::handleToolSignal(CaptureTool::Request r)
             }
             break;
         case CaptureTool::REQ_INCREASE_TOOL_SIZE:
-            updateThickness(m_context.thickness + 1);
+            setToolSize(m_context.toolSize + 1);
             break;
         case CaptureTool::REQ_DECREASE_TOOL_SIZE:
-            updateThickness(m_context.thickness - 1);
+            setToolSize(m_context.toolSize - 1);
             break;
         default:
             break;
     }
+}
+
+/**
+ * Was setDrawThickness
+ * - Update config options
+ * - Update tool object thickness
+ */
+void CaptureWidget::onToolSizeChanged(int t)
+{
+    CaptureTool* tool = activeButtonTool();
+    if (tool && tool->showMousePreview()) {
+        setCursor(Qt::BlankCursor);
+    }
+
+    // update tool size of object being drawn
+    if (m_activeTool != nullptr) {
+        updateTool(m_activeTool);
+    }
+
+    // update tool size of selected object
+    auto toolItem = activeToolObject();
+    if (toolItem) {
+        // Change thickness
+        toolItem->onSizeChanged(t);
+        if (!m_existingObjectIsChanged) {
+            m_captureToolObjectsBackup = m_captureToolObjects;
+            m_existingObjectIsChanged = true;
+        }
+        drawToolsData();
+        updateTool(toolItem);
+    }
+}
+
+void CaptureWidget::onToolSizeSettled(int size)
+{
+    m_config.setToolSize(activeButtonToolType(), size);
 }
 
 void CaptureWidget::setDrawColor(const QColor& c)
@@ -1150,6 +1222,8 @@ void CaptureWidget::setDrawColor(const QColor& c)
     if (m_context.color.isValid()) {
         ConfigHandler().setDrawColor(m_context.color);
         emit colorChanged(c);
+        // Update mouse preview
+        updateTool(activeButtonTool());
 
         // change color for the active tool
         auto toolItem = activeToolObject();
@@ -1189,6 +1263,7 @@ void CaptureWidget::selectAll()
 {
     m_selection->show();
     m_selection->setGeometry(rect());
+    emit m_selection->geometrySettled();
     m_buttonHandler->show();
     updateSelectionState();
 }
@@ -1223,92 +1298,68 @@ void CaptureWidget::removeToolObject(int index)
     }
 }
 
-void CaptureWidget::setDrawThickness(int t)
-{
-    m_context.thickness = qBound(1, t, maxDrawThickness);
-    // save draw thickness for text and other tool separately
-    if (m_activeButton) {
-        if (activeButtonToolType() == CaptureTool::TYPE_TEXT) {
-            m_config.setDrawFontSize(m_context.thickness);
-        } else {
-            m_config.setDrawThickness(m_context.thickness);
-        }
-    }
-
-    auto toolItem = activeToolObject();
-    if (toolItem) {
-        // Change thickness
-        toolItem->onThicknessChanged(t);
-        drawToolsData();
-        drawObjectSelection();
-        updateTool(toolItem);
-    } else {
-        emit thicknessChanged(m_context.thickness);
-    }
-}
-
 void CaptureWidget::initShortcuts()
 {
-    new QShortcut(
+    newShortcut(
       QKeySequence(ConfigHandler().shortcut("TYPE_UNDO")), this, SLOT(undo()));
 
-    new QShortcut(
+    newShortcut(
       QKeySequence(ConfigHandler().shortcut("TYPE_REDO")), this, SLOT(redo()));
 
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_TOGGLE_PANEL")),
-                  this,
-                  SLOT(togglePanel()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_TOGGLE_PANEL")),
+                this,
+                SLOT(togglePanel()));
 
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_RESIZE_LEFT")),
-                  m_selection,
-                  SLOT(resizeLeft()));
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_RESIZE_RIGHT")),
-                  m_selection,
-                  SLOT(resizeRight()));
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_RESIZE_UP")),
-                  m_selection,
-                  SLOT(resizeUp()));
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_RESIZE_DOWN")),
-                  m_selection,
-                  SLOT(resizeDown()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_RESIZE_LEFT")),
+                m_selection,
+                SLOT(resizeLeft()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_RESIZE_RIGHT")),
+                m_selection,
+                SLOT(resizeRight()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_RESIZE_UP")),
+                m_selection,
+                SLOT(resizeUp()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_RESIZE_DOWN")),
+                m_selection,
+                SLOT(resizeDown()));
 
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_MOVE_LEFT")),
-                  m_selection,
-                  SLOT(moveLeft()));
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_MOVE_RIGHT")),
-                  m_selection,
-                  SLOT(moveRight()));
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_MOVE_UP")),
-                  m_selection,
-                  SLOT(moveUp()));
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_MOVE_DOWN")),
-                  m_selection,
-                  SLOT(moveDown()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_MOVE_LEFT")),
+                m_selection,
+                SLOT(moveLeft()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_MOVE_RIGHT")),
+                m_selection,
+                SLOT(moveRight()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_MOVE_UP")),
+                m_selection,
+                SLOT(moveUp()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_MOVE_DOWN")),
+                m_selection,
+                SLOT(moveDown()));
 
-    new QShortcut(
+    newShortcut(
       QKeySequence(ConfigHandler().shortcut("TYPE_DELETE_CURRENT_TOOL")),
       this,
       SLOT(deleteCurrentTool()));
 
-    new QShortcut(
+    newShortcut(
       QKeySequence(ConfigHandler().shortcut("TYPE_COMMIT_CURRENT_TOOL")),
       this,
       SLOT(commitCurrentTool()));
 
-    new QShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_SELECT_ALL")),
-                  this,
-                  SLOT(selectAll()));
+    newShortcut(QKeySequence(ConfigHandler().shortcut("TYPE_SELECT_ALL")),
+                this,
+                SLOT(selectAll()));
 
-    new QShortcut(Qt::Key_Escape, this, SLOT(deleteToolWidgetOrClose()));
+    newShortcut(Qt::Key_Escape, this, SLOT(deleteToolWidgetOrClose()));
 }
 
 void CaptureWidget::deleteCurrentTool()
 {
-    int thickness_old = m_context.thickness;
+    int oldToolSize = m_context.toolSize;
     m_panel->slotButtonDelete(true);
     drawObjectSelection();
-    if (thickness_old != m_context.thickness) {
-        emit thicknessChanged(m_context.thickness);
+    if (oldToolSize != m_context.toolSize) {
+        emit toolSizeChanged(m_context.toolSize);
     }
 }
 
@@ -1395,9 +1446,9 @@ void CaptureWidget::pushToolToStack()
                    m_activeTool,
                    &CaptureTool::onColorChanged);
         disconnect(this,
-                   &CaptureWidget::thicknessChanged,
+                   &CaptureWidget::toolSizeChanged,
                    m_activeTool,
-                   &CaptureTool::onThicknessChanged);
+                   &CaptureTool::onSizeChanged);
         if (m_panel->toolWidget()) {
             disconnect(m_panel->toolWidget(), nullptr, m_activeTool, nullptr);
         }
@@ -1442,9 +1493,9 @@ void CaptureWidget::drawObjectSelection()
     if (toolItem && !toolItem->editMode()) {
         QPainter painter(&m_context.screenshot);
         toolItem->drawObjectSelection(painter);
-        if (m_context.thickness != toolItem->thickness()) {
-            m_context.thickness =
-              toolItem->thickness() <= 0 ? 0 : toolItem->thickness();
+        // TODO move this elsewhere
+        if (m_context.toolSize != toolItem->size()) {
+            m_context.toolSize = toolItem->size();
         }
         if (activeToolObject() && m_activeButton) {
             uncheckActiveTool();
@@ -1485,6 +1536,26 @@ void CaptureWidget::makeChild(QWidget* w)
 {
     w->setParent(this);
     w->installEventFilter(m_eventFilter);
+}
+
+/**
+ * @brief Wrapper around `new QShortcut`, properly handling Enter/Return.
+ */
+QList<QShortcut*> CaptureWidget::newShortcut(const QKeySequence& key,
+                                             QWidget* parent,
+                                             const char* slot)
+{
+    QList<QShortcut*> shortcuts;
+    QString strKey = key.toString();
+    if (strKey.contains("Enter") || strKey.contains("Return")) {
+        strKey.replace("Enter", "Return");
+        shortcuts << new QShortcut(strKey, parent, slot);
+        strKey.replace("Return", "Enter");
+        shortcuts << new QShortcut(strKey, parent, slot);
+    } else {
+        shortcuts << new QShortcut(key, parent, slot);
+    }
+    return shortcuts;
 }
 
 void CaptureWidget::togglePanel()

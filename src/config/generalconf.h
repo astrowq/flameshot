@@ -12,6 +12,7 @@ class QPushButton;
 class QLabel;
 class QLineEdit;
 class QSpinBox;
+class QComboBox;
 
 class GeneralConf : public QWidget
 {
@@ -39,6 +40,7 @@ private slots:
     void resetConfiguration();
     void togglePathFixed();
     void useJpgForClipboardChanged(bool checked);
+    void setSaveAsFileExtension(QString extension);
 
 private:
     const QString chooseFolder(const QString currentPath = "");
@@ -58,6 +60,7 @@ private:
     void initCopyAndCloseAfterUpload();
     void initSaveAfterCopy();
     void initCopyPathAfterSave();
+    void initAntialiasingPinZoom();
     void initUseJpgForClipboard();
 
     void _updateComponents(bool allowEmptySavePath);
@@ -75,6 +78,7 @@ private:
     QCheckBox* m_showStartupLaunchMessage;
     QCheckBox* m_copyAndCloseAfterUpload;
     QCheckBox* m_copyPathAfterSave;
+    QCheckBox* m_antialiasingPinZoom;
     QPushButton* m_importButton;
     QPushButton* m_exportButton;
     QPushButton* m_resetButton;
@@ -86,4 +90,5 @@ private:
     QCheckBox* m_useJpgForClipboard;
     QSpinBox* m_uploadHistoryMax;
     QSpinBox* m_undoLimit;
+    QComboBox* m_setSaveAsFileExtension;
 };

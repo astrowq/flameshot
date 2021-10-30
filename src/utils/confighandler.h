@@ -88,6 +88,10 @@ public:
     CONFIG_GETTER_SETTER(uploadHistoryMax, setUploadHistoryMax, int)
     CONFIG_GETTER_SETTER(saveAfterCopy, setSaveAfterCopy, bool)
     CONFIG_GETTER_SETTER(copyPathAfterSave, setCopyPathAfterSave, bool)
+    CONFIG_GETTER_SETTER(setSaveAsFileExtension,
+                         setSaveAsFileExtension,
+                         QString)
+    CONFIG_GETTER_SETTER(antialiasingPinZoom, setAntialiasingPinZoom, bool)
     CONFIG_GETTER_SETTER(useJpgForClipboard, setUseJpgForClipboard, bool)
     CONFIG_GETTER_SETTER(ignoreUpdateToVersion,
                          setIgnoreUpdateToVersion,
@@ -98,9 +102,9 @@ public:
     // SPECIAL CASES
     bool startupLaunch();
     void setStartupLaunch(const bool);
-    QString saveAsFileExtension();
-    CONFIG_SETTER(setSaveAsFileExtension, setSaveAsFileExtension, QString)
     void setAllTheButtons();
+    void setToolSize(CaptureTool::Type toolType, int size);
+    int toolSize(CaptureTool::Type toolType);
 
     // DEFAULTS
     QString filenamePatternDefault();
@@ -108,14 +112,14 @@ public:
     QString configFilePath() const;
 
     // GENERIC GETTERS AND SETTERS
-    bool setShortcut(const QString&, const QString&);
-    QString shortcut(const QString&);
+    bool setShortcut(const QString& actionName, const QString& shortcut);
+    QString shortcut(const QString& actionName);
     void setValue(const QString& key, const QVariant& value);
     QVariant value(const QString& key) const;
 
     // INFO
-    const QSet<QString>& recognizedGeneralOptions() const;
-    const QSet<QString>& recognizedShortcutNames() const;
+    static QSet<QString>& recognizedGeneralOptions();
+    static QSet<QString>& recognizedShortcutNames();
     QSet<QString> keysFromGroup(const QString& group) const;
 
     // ERROR HANDLING
